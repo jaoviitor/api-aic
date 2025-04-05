@@ -1,0 +1,140 @@
+trigger:
+  - apijs-dev
+
+variables:
+  azureSubscription: 'apijs-dev-ARM'
+  appName: 'as-apijs-dev'
+  vmImageName: 'ubuntu-latest'
+  workingDirectory: '$(System.DefaultWorkingDirectory)/'
+  targetUrl: 'https://as-apijs-dev.azurewebsites.net'
+
+stages:
+  - stage: Build
+    displayName: Build da Function App em TypeScript (Windows)
+    jobs:
+      - job: Build
+        displayName: Build da Function App
+        pool:
+          vmImage: $(vmImageName)
+
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            displayName: 'Instalar Node.js'
+
+          - script: |
+              npm install
+              npm run build
+              npm prune --production
+            displayName: 'Instalar dependências e compilar TypeScript'
+
+          - task: ArchiveFiles@2
+            displayName: "Criar pacote ZIP para deploy"
+            inputs:
+              rootFolderOrFile: "$(System.DefaultWorkingDirectory)"
+              archiveType: zip
+              archiveFile: "$(Build.ArtifactStagingDirectory)/functionapp.zip"
+              replaceExistingArchive: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publicar artefato do build"
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)/functionapp.zip"
+              artifactName: "drop"
+
+
+          - script: |
+              npm install
+            displayName: 'Install Dependencies'
+
+          - script: |
+              mkdir -p reports
+              npm run test:ci || true
+            displayName: 'Run Tests with Vitest'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFiles: 'reports/junit.xml'
+              testRunTitle: 'Vitest Results'
+            condition: succeededOrFailed()
+
+  - stage: Deploy
+    displayName: Deploy da Function App no Azure
+    dependsOn: Build
+    condition: succeeded()
+
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy
+        environment: 'development'
+        pool:
+          vmImage: $(vmImageName)
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureFunctionApp@2
+                  displayName: "Deploy no Azure Function App"
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    appType: functionAppLinux
+                    resourceGroupName: "aic-rg-apijs-dev"
+                    appName: $(appName)
+                    package: "$(Pipeline.Workspace)/drop/functionapp.zip"
+
+  - stage: ScanZap
+    jobs:
+      - job: ZapInit
+        steps:
+          # Baixar Saxon e xmlresolver
+          - bash: |
+              set -x
+              curl -L -o saxon-he-11.5.jar https://repo1.maven.org/maven2/net/sf/saxon/Saxon-HE/11.5/Saxon-HE-11.5.jar
+              curl -L -o xmlresolver-5.1.0.jar https://repo1.maven.org/maven2/org/xmlresolver/xmlresolver/5.1.0/xmlresolver-5.1.0.jar
+            displayName: 'Baixar Saxon e xmlresolver'
+
+          # Executar o OWASP ZAP Scan e salvar o relatório XML
+          - bash: |
+              set -x
+              mkdir -p $(pwd)/zap_results
+              chmod 777 $(pwd)/zap_results
+              docker run --rm -v $(pwd)/zap_results:/zap/wrk/:rw -t zaproxy/zap-stable \
+              zap-full-scan.py -t "$(targetUrl)" -x xml_report.xml -d || true
+            displayName: 'Executar OWASP ZAP Scan'
+
+          - bash: ls -lah $(pwd)/zap_results
+            displayName: 'Verificar se o XML foi gerado'
+
+          - bash: |
+              set -x
+              mkdir -p $(System.DefaultWorkingDirectory)/zap_results
+              chmod 777 $(System.DefaultWorkingDirectory)/zap_results
+            displayName: 'Criar pasta zap_results'
+
+          # Executar transformação XSLT com Saxon para converter XML para NUnit
+          - bash: |
+              set -x
+              java -cp "saxon-he-11.5.jar:xmlresolver-5.1.0.jar" net.sf.saxon.Transform \
+                  -s:$(System.DefaultWorkingDirectory)/zap_results/xml_report.xml \
+                  -xsl:$(System.DefaultWorkingDirectory)/xml_to_nunit.xslt \
+                  -o:$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml \
+                  sourceFolder=$(System.DefaultWorkingDirectory)
+            displayName: 'Converter XML para NUnit'
+
+          # Publicar o relatório convertido como artefato
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publicar relatório NUnit convertido como artefato'
+            inputs:
+              pathToPublish: '$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml'
+              artifactName: 'ConvertedNUnitReport'
+              publishLocation: 'Container'
+
+          # Publicar os resultados de teste NUnit
+          - task: PublishTestResults@2
+            displayName: 'Publicar resultados de testes NUnit'
+            inputs:
+              testResultsFormat: 'NUnit'
+              testResultsFiles: '$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml'
+              testRunTitle: 'Test Results'

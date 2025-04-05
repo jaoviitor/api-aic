@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "node16",              // Use ECMAScript module system
+    "target": "es6",                 // Target ECMAScript 6
+    "outDir": "dist",                // Output directory for compiled files
+    "rootDir": ".",                  // Root directory for source files
+    "sourceMap": true,               // Generate source maps
+    "strict": false,                 // Disable strict mode (optional)
+    "esModuleInterop": true,         // Enable interoperability between ES and CommonJS modules
+    "baseUrl": "src",                // Set the base URL for imports
+    "moduleResolution": "node16",    // Use Node.js 16+ module resolution
+    "resolveJsonModule": true,       // Allow imports of .json files
+    "skipLibCheck": true             // Skip checking declaration files for better performance
+  }
+}
