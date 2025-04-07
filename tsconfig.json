@@ -1,15 +1,16 @@
 {
   "compilerOptions": {
-    "module": "node16",              // Use ECMAScript module system
-    "target": "es6",                 // Target ECMAScript 6
-    "outDir": "dist",                // Output directory for compiled files
-    "rootDir": ".",                  // Root directory for source files
-    "sourceMap": true,               // Generate source maps
-    "strict": false,                 // Disable strict mode (optional)
-    "esModuleInterop": true,         // Enable interoperability between ES and CommonJS modules
-    "baseUrl": "src",                // Set the base URL for imports
-    "moduleResolution": "node16",    // Use Node.js 16+ module resolution
-    "resolveJsonModule": true,       // Allow imports of .json files
-    "skipLibCheck": true             // Skip checking declaration files for better performance
-  }
+    "module": "commonjs",           // Melhor para Node.js/Express
+    "target": "es2020",             // ES2020 oferece recursos úteis
+    "outDir": "dist",               // Mantém o outDir como dist
+    "rootDir": "src",               // Mudança importante: rootDir deve ser src
+    "sourceMap": true,              // Mantém sourceMap
+    "strict": false,                // Mantém strict como false, se preferir
+    "esModuleInterop": true,        // Mantém esModuleInterop
+    "moduleResolution": "node",     // Use "node" em vez de "node16"
+    "resolveJsonModule": true,      // Mantém resolveJsonModule
+    "skipLibCheck": true            // Mantém skipLibCheck
+  },
+  "include": ["src/**/*"],          // Inclui apenas arquivos em src
+  "exclude": ["node_modules", "**/*.test.ts"]
 }

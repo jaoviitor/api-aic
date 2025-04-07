@@ -2,7 +2,7 @@ import { Pool } from "pg";
 import { UpdatePacienteRequest } from "../types/pacienteTypes";
 import { pool, poolWrite, connectToHospitalDb } from "../config/database";
 
-export async function getPacientes(user: string, pass: string) {
+export async function listPacientes(user: string, pass: string) {
     let pool: Pool | null = null;
 
     try {
@@ -79,11 +79,9 @@ export async function insertPaciente(pacienteData: any) {
         NumTelefone3,
         NumTelefone4,
       } = pacienteData;
-      console.log("Conectando ao banco...");
       const client = await poolWrite.connect();
 
       try{
-        console.log("Iniciando transação...");
         await client.query("BEGIN");
 
         const pacienteQuery = `
@@ -105,11 +103,8 @@ export async function insertPaciente(pacienteData: any) {
             Anamnese,
             NumTelefone,
         ];
-        console.log("Executando query de paciente:", pacienteQuery, pacienteValues);
         const pacienteResult = await client.query(pacienteQuery, pacienteValues);
-        console.log("Resultado da query de paciente:", pacienteResult);
         const idPaciente = pacienteResult.rows[0].idpaciente;
-        console.log("ID do paciente obtido:", idPaciente);
         const numeroQuery = `
             INSERT INTO public.numero (
                 numtelefone, numtelefone2, numtelefone3, numtelefone4,
