@@ -1,140 +1,363 @@
 trigger:
-  - apijs-dev
+  branches:
+    include:
+    - dev  # Ambiente DEV
+    - main  # Ambiente PROD
+  paths:
+    include:
+    - 'src/**'
+    - 'Dockerfile'
+    - 'azure-pipelines.yml'
+    exclude:
+    - '**/*.md'
+    - 'docs/**'
+    - 'README.md'
+
+pr:
+  branches:
+    include:
+    - dev
+    - main
+  autoCancel: "true" 
+
+resources:
+  repositories:
+  - repository: k8s-manifests
+    type: git
+    name: Vital_HC_UFPE/api-js-k8s
+    endpoint: api-js-k8s-connection
+    ref: refs/heads/main
+
+pool:
+  vmImage: 'ubuntu-latest'
 
 variables:
-  azureSubscription: 'apijs-dev-ARM'
-  appName: 'as-apijs-dev'
-  vmImageName: 'ubuntu-latest'
-  workingDirectory: '$(System.DefaultWorkingDirectory)/'
-  targetUrl: 'https://as-apijs-dev.azurewebsites.net'
+  - group: argocd-credentials
+  - name: tag
+    value: '$(Build.SourceBranchName)-$(Build.BuildId)'
+  - name: acrName
+    value: 'acraicapijs'
+  - name: acrImageNameDev
+    value: '$(acrName).azurecr.io/api-js-dev'
+  - name: acrImageNameProd
+    value: '$(acrName).azurecr.io/api-js-prod'
+  - name: system.debug
+    value: 'true'
 
 stages:
-  - stage: Build
-    displayName: Build da Function App em TypeScript (Windows)
-    jobs:
-      - job: Build
-        displayName: Build da Function App
-        pool:
-          vmImage: $(vmImageName)
+- stage: Build
+  displayName: 'Build & Push'
+  jobs:
+  - job: BuildAndPush
+    steps:
+    - checkout: self
+      persistCredentials: 'true'
+    
+    - task: NodeTool@0
+      displayName: 'Install Node.js'
+      inputs:
+        versionSpec: '20.x'
+    
+    - script: |
+        npm install
+        npm run build
+      displayName: 'Install dependencies and build'
+    
+    - bash: |
+        if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+          echo "##vso[task.setvariable variable=REPO_NAME]api-js-prod"
+          echo "##vso[task.setvariable variable=ACR_IMAGE_NAME]$(acrImageNameProd)"
+          echo "##vso[task.setvariable variable=tag]prod-$(Build.BuildId)"
+        else
+          echo "##vso[task.setvariable variable=REPO_NAME]api-js-dev"
+          echo "##vso[task.setvariable variable=ACR_IMAGE_NAME]$(acrImageNameDev)"
+          echo "##vso[task.setvariable variable=tag]dev-$(Build.BuildId)"
+        fi
+      displayName: 'Set Repository Name and Tag'
+    
+    - task: Docker@2
+      displayName: 'Build and Push Docker Image'
+      inputs:
+        containerRegistry: 'acraicapijs'
+        repository: '$(REPO_NAME)'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)'
+        tags: |
+          $(tag)
+    
+    - bash: |
+        if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+          echo "##vso[task.setvariable variable=ENV_NAME;isOutput=true]prod"
+          echo "##vso[task.setvariable variable=K8S_PATH;isOutput=true]overlays/prod"
+          echo "##vso[task.setvariable variable=REPO_NAME;isOutput=true]api-js-prod"
+          echo "##vso[task.setvariable variable=ACR_IMAGE_NAME;isOutput=true]$(acrImageNameProd)"
+          echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]prod-$(Build.BuildId)"
+        else
+          echo "##vso[task.setvariable variable=ENV_NAME;isOutput=true]dev"
+          echo "##vso[task.setvariable variable=K8S_PATH;isOutput=true]overlays/dev"
+          echo "##vso[task.setvariable variable=REPO_NAME;isOutput=true]api-js-dev"
+          echo "##vso[task.setvariable variable=ACR_IMAGE_NAME;isOutput=true]$(acrImageNameDev)"
+          echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]dev-$(Build.BuildId)"
+        fi
+        
+        echo "Environment: $(ENV_NAME)"
+        echo "K8s Path: $(K8S_PATH)"
+        echo "Repository: $(REPO_NAME)"
+        echo "ACR Image Name: $(ACR_IMAGE_NAME)"
+        echo "Image Tag: $(IMAGE_TAG)"
+      displayName: 'Set Environment Variables'
+      name: setVars
 
-        steps:
-          - task: NodeTool@0
-            inputs:
-              versionSpec: '20.x'
-            displayName: 'Instalar Node.js'
+- stage: SecurityScan
+  dependsOn: Build
+  jobs:
+  - job: TrivyScan
+    variables:
+      ENV_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ENV_NAME'] ]
+      K8S_PATH: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.K8S_PATH'] ]
+      REPO_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.REPO_NAME'] ]
+      ACR_IMAGE_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ACR_IMAGE_NAME'] ]
+    steps:
+    - task: Bash@3
+      displayName: 'Run Trivy Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Environment: $(ENV_NAME)"
+          echo "K8s Path: $(K8S_PATH)"
+          echo "Repository: $(REPO_NAME)"
+          echo "ACR Image Name: $(ACR_IMAGE_NAME)"
+          
+          az acr login -n $(acrName)
+          docker pull $(ACR_IMAGE_NAME):$(tag)
+          
+          mkdir -p $(Build.ArtifactStagingDirectory)/security
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(Build.ArtifactStagingDirectory)/security:/report \
+            aquasec/trivy:latest image \
+            --format template \
+            --template "@/contrib/html.tpl" \
+            --output "/report/trivy-report.html" \
+            --scanners vuln \
+            --no-progress \
+            --skip-db-update \
+            --ignore-unfixed \
+            $(ACR_IMAGE_NAME):$(tag)
+      continueOnError: true
 
-          - script: |
-              npm install
-              npm run build
-              npm prune --production
-            displayName: 'Instalar dependências e compilar TypeScript'
+    - publish: $(Build.ArtifactStagingDirectory)/security
+      artifact: SecurityReports
+      displayName: 'Publish Security Reports'
 
-          - task: ArchiveFiles@2
-            displayName: "Criar pacote ZIP para deploy"
-            inputs:
-              rootFolderOrFile: "$(System.DefaultWorkingDirectory)"
-              archiveType: zip
-              archiveFile: "$(Build.ArtifactStagingDirectory)/functionapp.zip"
-              replaceExistingArchive: true
+- stage: UpdateManifests
+  dependsOn: SecurityScan
+  jobs:
+  - job: UpdateGitOps
+    variables:
+      ENV_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ENV_NAME'] ]
+      K8S_PATH: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.K8S_PATH'] ]
+      REPO_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.REPO_NAME'] ]
+      ACR_IMAGE_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ACR_IMAGE_NAME'] ]
+      IMAGE_TAG: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.IMAGE_TAG'] ]
+    steps:
+    - checkout: k8s-manifests
+      persistCredentials: 'true'
+      clean: 'true'
 
-          - task: PublishBuildArtifacts@1
-            displayName: "Publicar artefato do build"
-            inputs:
-              pathToPublish: "$(Build.ArtifactStagingDirectory)/functionapp.zip"
-              artifactName: "drop"
+    - task: Bash@3
+      displayName: 'Update Image Tag'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Environment: $(ENV_NAME)"
+          echo "K8s Path: $(K8S_PATH)"
+          echo "Repository: $(REPO_NAME)"
+          echo "ACR Image Name: $(ACR_IMAGE_NAME)"
+          echo "Image Tag: $(IMAGE_TAG)"
+          echo "Working directory: $(pwd)"
+          echo "Listing directory contents:"
+          ls -la
+          
+          # Definir valores padrão se as variáveis estiverem vazias
+          if [ -z "$(ENV_NAME)" ]; then
+            # Verificar a branch atual para definir o valor padrão correto
+            if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+              echo "ENV_NAME is empty but we're on main branch, setting default value to prod"
+              ENV_NAME="prod"
+            else
+              echo "ENV_NAME is empty, setting default value to dev"
+              ENV_NAME="dev"
+            fi
+          fi
+          
+          if [ -z "$(K8S_PATH)" ]; then
+            # Verificar a branch atual para definir o valor padrão correto
+            if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+              echo "K8S_PATH is empty but we're on main branch, setting default value to overlays/prod"
+              K8S_PATH="overlays/prod"
+            else
+              echo "K8S_PATH is empty, setting default value to overlays/dev"
+              K8S_PATH="overlays/dev"
+            fi
+          fi
+          
+          if [ -z "$(REPO_NAME)" ]; then
+            # Verificar a branch atual para definir o valor padrão correto
+            if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+              echo "REPO_NAME is empty but we're on main branch, setting default value to api-js-prod"
+              REPO_NAME="api-js-prod"
+            else
+              echo "REPO_NAME is empty, setting default value to api-js-dev"
+              REPO_NAME="api-js-dev"
+            fi
+          fi
+          
+          if [ -z "$(ACR_IMAGE_NAME)" ]; then
+            # Verificar a branch atual para definir o valor padrão correto
+            if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+              echo "ACR_IMAGE_NAME is empty but we're on main branch, setting default value to $(acrImageNameProd)"
+              ACR_IMAGE_NAME="$(acrImageNameProd)"
+            else
+              echo "ACR_IMAGE_NAME is empty, setting default value to $(acrImageNameDev)"
+              ACR_IMAGE_NAME="$(acrImageNameDev)"
+            fi
+          fi
+          
+          if [ -z "$(IMAGE_TAG)" ]; then
+            # Verificar a branch atual para definir o valor padrão correto
+            if [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+              echo "IMAGE_TAG is empty but we're on main branch, setting default value to prod-$(Build.BuildId)"
+              IMAGE_TAG="prod-$(Build.BuildId)"
+            else
+              echo "IMAGE_TAG is empty, setting default value to dev-$(Build.BuildId)"
+              IMAGE_TAG="dev-$(Build.BuildId)"
+            fi
+          fi
+          
+          echo "Using Environment: $ENV_NAME"
+          echo "Using K8s Path: $K8S_PATH"
+          echo "Using Repository: $REPO_NAME"
+          echo "Using ACR Image Name: $ACR_IMAGE_NAME"
+          echo "Using Image Tag: $IMAGE_TAG"
+          
+          # Instalar yq
+          echo "Downloading yq..."
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          
+          # Verificar se o diretório existe
+          if [ ! -d "$K8S_PATH" ]; then
+            echo "Error: Directory not found: $K8S_PATH"
+            echo "Available directories:"
+            find . -type d | sort
+            exit 1
+          fi
+          
+          KUSTOMIZATION_FILE="$K8S_PATH/kustomization.yaml"
+          echo "Looking for file: $KUSTOMIZATION_FILE"
+          
+          if [ ! -f "$KUSTOMIZATION_FILE" ]; then
+            echo "Error: File not found at $KUSTOMIZATION_FILE"
+            echo "Available files in directory:"
+            find "$K8S_PATH" -type f | sort
+            exit 1
+          fi
+          
+          echo "Current content of kustomization.yaml:"
+          cat "$KUSTOMIZATION_FILE"
+          
+          echo "Updating image name and tag..."
+          # Definir o nome base da imagem para substituição
+          BASE_IMAGE="acraicapijs.azurecr.io/api-js:latest"
+          
+          # Usando o nome da imagem completo do ACR e garantindo que o campo name não fique vazio
+          yq -i '.images[0].name="'$BASE_IMAGE'"' "$KUSTOMIZATION_FILE"
+          yq -i '.images[0].newName="'$ACR_IMAGE_NAME'"' "$KUSTOMIZATION_FILE"
+          yq -i '.images[0].newTag="'$IMAGE_TAG'"' "$KUSTOMIZATION_FILE"
+          
+          echo "Updated content of kustomization.yaml:"
+          cat "$KUSTOMIZATION_FILE"
+          
+          echo "Configuring git..."
+          git config --global user.email "azure-pipeline@dev.azure.com"
+          git config --global user.name "Azure Pipeline"
+          
+          echo "Git status:"
+          git status
+          
+          echo "Adding changes to git..."
+          git add "$KUSTOMIZATION_FILE"
+          
+          echo "Committing changes..."
+          git commit -m "chore: update image tag to $IMAGE_TAG [skip ci]"
+          
+          echo "Pushing changes..."
+          git push origin HEAD:main
 
+- stage: ValidateDeployment
+  dependsOn: UpdateManifests
+  jobs:
+  - job: CheckArgoCD
+    variables:
+      ENV_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ENV_NAME'] ]
+      K8S_PATH: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.K8S_PATH'] ]
+      REPO_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.REPO_NAME'] ]
+      ACR_IMAGE_NAME: $[ stageDependencies.Build.BuildAndPush.outputs['setVars.ACR_IMAGE_NAME'] ]
+    steps:
+    - task: Bash@3
+      displayName: 'Wait for ArgoCD Sync'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Environment: $(ENV_NAME)"
+          echo "K8s Path: $(K8S_PATH)"
+          echo "Repository: $(REPO_NAME)"
+          echo "ACR Image Name: $(ACR_IMAGE_NAME)"
+          
+          # Install ArgoCD CLI
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+          rm argocd-linux-amd64
+          
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/stable.txt"
+          curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          # Install jq
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Login no ArgoCD
+          argocd login $(ARGOCD_SERVER) --username $(ARGOCD_USERNAME) --password $(ARGOCD_PASSWORD) --insecure
+          
+          echo "Getting initial application status..."
+          argocd app get api-js-$(ENV_NAME)
+          
+          echo "Waiting for ArgoCD to detect changes..."
+          sleep 60
+          
+          echo "Forcing application refresh..."
+          argocd app get api-js-$(ENV_NAME) --refresh
+          
+          for i in {1..30}; do
+            echo "Attempt $i/30"
+            sync_status=$(argocd app get api-js-$(ENV_NAME) -o json | jq -r '.status.sync.status')
+            health_status=$(argocd app get api-js-$(ENV_NAME) -o json | jq -r '.status.health.status')
+            
+            if [ "$sync_status" = "Synced" ] && [ "$health_status" = "Healthy" ]; then
+              echo "Application successfully synced and healthy!"
+              kubectl get deployment api-js -n api-js-$(ENV_NAME) -o jsonpath='{.spec.template.spec.containers[0].image}'
+              exit 0
+            fi
+            
+            sleep 10
+          done
+          
+          echo "Timeout waiting for sync"
+          exit 0
+      continueOnError: true
 
-          - script: |
-              npm install
-            displayName: 'Install Dependencies'
-
-          - script: |
-              mkdir -p reports
-              npm run test:ci || true
-            displayName: 'Run Tests with Vitest'
-
-          - task: PublishTestResults@2
-            inputs:
-              testResultsFiles: 'reports/junit.xml'
-              testRunTitle: 'Vitest Results'
-            condition: succeededOrFailed()
-
-  - stage: Deploy
-    displayName: Deploy da Function App no Azure
-    dependsOn: Build
-    condition: succeeded()
-
-    jobs:
-      - deployment: Deploy
-        displayName: Deploy
-        environment: 'development'
-        pool:
-          vmImage: $(vmImageName)
-
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: AzureFunctionApp@2
-                  displayName: "Deploy no Azure Function App"
-                  inputs:
-                    azureSubscription: $(azureSubscription)
-                    appType: functionAppLinux
-                    resourceGroupName: "aic-rg-apijs-dev"
-                    appName: $(appName)
-                    package: "$(Pipeline.Workspace)/drop/functionapp.zip"
-
-  - stage: ScanZap
-    jobs:
-      - job: ZapInit
-        steps:
-          # Baixar Saxon e xmlresolver
-          - bash: |
-              set -x
-              curl -L -o saxon-he-11.5.jar https://repo1.maven.org/maven2/net/sf/saxon/Saxon-HE/11.5/Saxon-HE-11.5.jar
-              curl -L -o xmlresolver-5.1.0.jar https://repo1.maven.org/maven2/org/xmlresolver/xmlresolver/5.1.0/xmlresolver-5.1.0.jar
-            displayName: 'Baixar Saxon e xmlresolver'
-
-          # Executar o OWASP ZAP Scan e salvar o relatório XML
-          - bash: |
-              set -x
-              mkdir -p $(pwd)/zap_results
-              chmod 777 $(pwd)/zap_results
-              docker run --rm -v $(pwd)/zap_results:/zap/wrk/:rw -t zaproxy/zap-stable \
-              zap-full-scan.py -t "$(targetUrl)" -x xml_report.xml -d || true
-            displayName: 'Executar OWASP ZAP Scan'
-
-          - bash: ls -lah $(pwd)/zap_results
-            displayName: 'Verificar se o XML foi gerado'
-
-          - bash: |
-              set -x
-              mkdir -p $(System.DefaultWorkingDirectory)/zap_results
-              chmod 777 $(System.DefaultWorkingDirectory)/zap_results
-            displayName: 'Criar pasta zap_results'
-
-          # Executar transformação XSLT com Saxon para converter XML para NUnit
-          - bash: |
-              set -x
-              java -cp "saxon-he-11.5.jar:xmlresolver-5.1.0.jar" net.sf.saxon.Transform \
-                  -s:$(System.DefaultWorkingDirectory)/zap_results/xml_report.xml \
-                  -xsl:$(System.DefaultWorkingDirectory)/xml_to_nunit.xslt \
-                  -o:$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml \
-                  sourceFolder=$(System.DefaultWorkingDirectory)
-            displayName: 'Converter XML para NUnit'
-
-          # Publicar o relatório convertido como artefato
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publicar relatório NUnit convertido como artefato'
-            inputs:
-              pathToPublish: '$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml'
-              artifactName: 'ConvertedNUnitReport'
-              publishLocation: 'Container'
-
-          # Publicar os resultados de teste NUnit
-          - task: PublishTestResults@2
-            displayName: 'Publicar resultados de testes NUnit'
-            inputs:
-              testResultsFormat: 'NUnit'
-              testResultsFiles: '$(System.DefaultWorkingDirectory)/zap_results/converted_report.xml'
-              testRunTitle: 'Test Results'
+## Teste de Gatilho.

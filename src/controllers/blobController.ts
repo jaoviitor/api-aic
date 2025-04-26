@@ -1,13 +1,30 @@
 import { Request, Response } from 'express';
-import { generateBlobSasUrl } from '../services/blobService';
+import { generateSasUrl } from '../services/blobService';
 
-export const getBlobUrl = (req: Request, res: Response): void => {
+export const getBlobUrl = async (req: Request, res: Response): Promise<void> => {
     try {
         const { blobName, containerName } = req.params;
-        const blobUrl = generateBlobSasUrl(blobName, containerName);
+        const blobUrl = await generateSasUrl(blobName);
+        
+        if (!blobUrl) {
+            res.status(503).json({
+                message: 'Azure Storage service is not available',
+                details: 'Storage service is not properly configured'
+            });
+            return;
+        }
+        
         res.status(200).send({ blobUrl });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error generating SAS token', error);
-        res.status(500).send({ error: 'Error generating SAS token' });
+        
+        if (error.message && error.message.includes('Azure Storage credentials are not configured')) {
+            res.status(503).json({
+                message: 'Azure Storage service is not available',
+                details: 'Storage service is not properly configured'
+            });
+        } else {
+            res.status(500).send({ error: 'Error generating SAS token' });
+        }
     }
 };

@@ -1,33 +1,27 @@
+import { Request, Response } from 'express';
 import { getRequests, getGeral } from "../services/requestService";
 
-export async function handleGetRequest() {
+export const getRequestsHandler = async (req: Request, res: Response): Promise<void> => {
     try {
         const requests = await getRequests();
-        return {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-            body: requests,
-        };
-    } catch (error) {
-        return {
-            status: 500,
-            body: `Error when searching for patients: ${error.message}`,
-        };
+        res.status(200).json(requests);
+    } catch (error: any) {
+        res.status(500).json({
+            error: "Error when searching for requests",
+            message: error.message
+        });
     }
-}
+};
 
-export async function handleGetGeral() {
+
+export const getGeralHandler = async (req: Request, res: Response): Promise<void> => {
     try {
         const geral = await getGeral();
-        return {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-            body: geral,
-        };
-    } catch (error) {
-        return {
-            status: 500,
-            body: `Error when searching for patients: ${error.message}`,
-        };
+        res.status(200).json(geral);
+    } catch (error: any) {
+        res.status(500).json({
+            error: "Error when searching for general data",
+            message: error.message
+        });
     }
-}
+};

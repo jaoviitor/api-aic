@@ -1,34 +1,68 @@
-FROM mcr.microsoft.com/azure-functions/node:4-node20
+# Estágio de build
+FROM node:20-alpine AS builder
 
-# Definir diretório de trabalho
-WORKDIR /home/site/wwwroot
+# Instalar dependências necessárias para o sharp
+RUN apk add --no-cache python3 make g++ vips-dev
 
-# Instalar Azure Functions Core Tools explicitamente
-RUN apt-get update && \
-    apt-get install -y wget ca-certificates gnupg && \
-    wget -q https://packages.microsoft.com/keys/microsoft.asc -O- | apt-key add - && \
-    wget -q https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb && \
-    dpkg -i packages-microsoft-prod.deb && \
-    apt-get update && \
-    apt-get install -y azure-functions-core-tools-4
+# Criar e definir o diretório de trabalho
+WORKDIR /usr/src/app
 
-# Copiar apenas os arquivos essenciais para instalar dependências
-COPY package.json package-lock.json tsconfig.json ./
+# Copiar apenas os arquivos de dependências primeiro
+COPY package*.json ./
 
-# Instalar dependências de forma otimizada
-RUN npm install --legacy-peer-deps
+# Remover sharp das dependências para instalá-lo separadamente
+RUN npm ci && \
+    npm uninstall sharp && \
+    npm install --platform=linux --libc=musl sharp
 
-# Instalar TypeScript globalmente no container
-RUN npm install -g typescript
-
-# Copiar o restante do código do aplicativo
+# Copiar o restante do código-fonte da aplicação
 COPY . .
 
-# Construir o aplicativo
-RUN npm run build --legacy-peer-deps
+# Copiar o arquivo .env (se existir)
+COPY .env* ./
 
-# Expor a porta na qual o aplicativo será executado
-EXPOSE 7071
+# Criar diretório temp necessário para o fileUpload
+RUN mkdir -p temp
 
-# Comando para iniciar o aplicativo
-CMD ["npm", "start"]
+# Compilar o TypeScript
+RUN npm run build
+
+# Estágio de produção
+FROM node:20-alpine AS production
+
+# Instalar dependências necessárias para o sharp em produção
+RUN apk add --no-cache vips-dev
+
+# Definir variáveis de ambiente
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Criar e definir o diretório de trabalho
+WORKDIR /usr/src/app
+
+# Copiar apenas os arquivos de dependências
+COPY package*.json ./
+
+# Instalar apenas dependências de produção com suporte específico para Alpine Linux
+RUN npm ci --only=production --ignore-scripts && \
+    npm uninstall sharp && \
+    npm install --platform=linux --libc=musl --only=production sharp
+
+# Copiar os arquivos compilados do estágio de build
+COPY --from=builder /usr/src/app/dist ./dist
+COPY --from=builder /usr/src/app/temp ./temp
+
+# Copiar o arquivo .env do estágio de builder
+COPY --from=builder /usr/src/app/.env* ./
+
+# Expor a porta da aplicação
+EXPOSE 3000
+
+# Configurar healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+
+# Iniciar a aplicação
+CMD ["node", "dist/server.js"]
+
+# Teste para iniciar pipeline na branch main

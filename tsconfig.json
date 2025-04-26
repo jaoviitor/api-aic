@@ -5,11 +5,13 @@
     "outDir": "dist",               // Mantém o outDir como dist
     "rootDir": "src",               // Mudança importante: rootDir deve ser src
     "sourceMap": true,              // Mantém sourceMap
-    "strict": false,                // Mantém strict como false, se preferir
+    "strict": true,                // Mantém strict como false, se preferir
     "esModuleInterop": true,        // Mantém esModuleInterop
     "moduleResolution": "node",     // Use "node" em vez de "node16"
     "resolveJsonModule": true,      // Mantém resolveJsonModule
-    "skipLibCheck": true            // Mantém skipLibCheck
+    "skipLibCheck": true,            // Mantém skipLibCheck
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "vitest/globals"]
   },
   "include": ["src/**/*"],          // Inclui apenas arquivos em src
   "exclude": ["node_modules", "**/*.test.ts"]

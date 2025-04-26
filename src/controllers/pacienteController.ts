@@ -33,17 +33,28 @@ export const addPaciente = async (req: Request, res: Response): Promise<void> =>
             return;
         }
 
+        const requiredFields = ['Nome', 'DtNascimento', 'Sexo', 'Prontuario', 'NumTelefone'];
+        const missingFields = requiredFields.filter(field => !body[field]);
+        
+        if (missingFields.length > 0) {
+            res.status(400).json({ 
+                error: "Campos obrigatórios não informados", 
+                missingFields 
+            });
+            return;
+        }
+
         const result = await insertPaciente(body);
 
         res.status(201).json({
             message: "Paciente inserido com sucesso.",
             data: result,
         });
-    } catch (error: any) {
-        console.error(`Erro ao processar requisição: ${error.message}`);
+    } catch (serviceError: any) {
+        console.error("Service error:", serviceError);
         res.status(500).json({
-            error: `Erro interno: ${error.message || 'Erro desconhecido'}`,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            error: `Erro interno: ${serviceError.message || 'Erro desconhecido'}`,
+            stack: serviceError.stack
         });
     }
 };

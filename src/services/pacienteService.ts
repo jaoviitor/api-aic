@@ -79,6 +79,7 @@ export async function insertPaciente(pacienteData: any) {
         NumTelefone3,
         NumTelefone4,
       } = pacienteData;
+
       const client = await poolWrite.connect();
 
       try{
@@ -103,6 +104,7 @@ export async function insertPaciente(pacienteData: any) {
             Anamnese,
             NumTelefone,
         ];
+
         const pacienteResult = await client.query(pacienteQuery, pacienteValues);
         const idPaciente = pacienteResult.rows[0].idpaciente;
         const numeroQuery = `
